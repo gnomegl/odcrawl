@@ -83,106 +83,74 @@ clean_html_tags() {
   echo "$1" | sed 's/<[^>]*>//g'
 }
 
-build_json_array() {
-    local input_string="$1"
-    local prefix="${2:-}"  
-    local suffix="${3:-}" 
-    local output_array=""
-    local item
-
-    if [ -n "$input_string" ]; then
-        IFS=',' read -ra ITEMS <<< "$input_string"
-        for item in "${ITEMS[@]}"; do
-            item=$(echo "$item" | xargs)
-            if [ -n "$item" ]; then  
-                if [ -n "$output_array" ]; then
-                    output_array="${output_array},${prefix}${item}${suffix}"
-                else
-                    output_array="${prefix}${item}${suffix}"
-                fi
-            fi
-        done
-    fi
-    echo "$output_array"
-}
-
 build_query() {
-    local url_query="$1"
-    local filename_query="$2"
-    local exclude_extensions="$3"
-    local include_extensions="$4"
-
-    local clauses=()
-    local must_clauses=()
-    local should_clauses=()
-    local must_not_clauses=()
-
-    if [ -n "$url_query" ]; then
-        url_query=$(url_encode "$url_query")
-    fi
-
-    if [ -n "$url_query" ]; then
-        must_clauses+=("\"match_phrase\":{\"url\":\"$url_query\"}")
-    fi
-
-    if [ -n "$include_extensions" ]; then
-        local inc_array
-        inc_array=$(build_json_array "$include_extensions" "\"" "\"")
-        if [ -n "$inc_array" ]; then
-            must_clauses+=("\"terms\":{\"extension\":[${inc_array}]}")
-        fi
-    fi
-
-    if [ ${#must_clauses[@]} -gt 0 ]; then
-        local must_elements=()
-        for clause in "${must_clauses[@]}"; do
-            must_elements+=("{$clause}")
-        done
-        local must_string
-        must_string=$(IFS=','; echo "${must_elements[*]}")
-        clauses+=("\"must\":[${must_string}]")
-    fi
-
-    # --- Build 'should' clause ---
-    if [ -n "$filename_query" ]; then
-        should_clauses+=("\"match_phrase\":{\"filename\":\"$filename_query\"}")
-    fi
-
-    if [ ${#should_clauses[@]} -gt 0 ]; then
-        local should_elements=()
-        for clause in "${should_clauses[@]}"; do
-            should_elements+=("{$clause}")
-        done
-        local should_string
-        should_string=$(IFS=','; echo "${should_elements[*]}")
-        clauses+=("\"should\":[${should_string}]")
-    fi
-
-    if [ -n "$exclude_extensions" ]; then
-        local exc_array
-        exc_array=$(build_json_array "$exclude_extensions" "\"" "\"")
-        if [ -n "$exc_array" ]; then
-            must_not_clauses+=("\"terms\":{\"extension\":[${exc_array}]}")
-        fi
-    fi
-
-    if [ ${#must_not_clauses[@]} -gt 0 ]; then
-        local must_not_elements=()
-        for clause in "${must_not_clauses[@]}"; do
-            must_not_elements+=("{$clause}")
-        done
-        local must_not_string
-        must_not_string=$(IFS=','; echo "${must_not_elements[*]}")
-        clauses+=("\"must_not\":[${must_not_string}]")
-    fi
-
-    if [ ${#clauses[@]} -gt 0 ]; then
-        local clauses_string
-        clauses_string=$(IFS=','; echo "${clauses[*]}")
-        echo "\"bool\":{${clauses_string}}"
+  local url_query="$1"
+  local filename_query="$2"
+  local exclude_extensions="$3"
+  local include_extensions="$4"
+  
+  if [ -n "$url_query" ]; then
+    url_query=$(url_encode "$url_query")
+  fi
+  
+  # Build must array
+  local must_clause=""
+  if [ -n "$url_query" ]; then
+    must_clause="\"must\":[{\"match_phrase\":{\"url\":\"$url_query\"}}],"
+  else
+    must_clause="\"must\":[{\"match_phrase\":{\"url\":\"\"}}],"
+  fi
+  
+  # Build should array  
+  local should_clause=""
+  if [ -n "$filename_query" ]; then
+    should_clause="\"should\":[{\"match_phrase\":{\"filename\":\"$filename_query\"}}],"
+  fi
+  
+  # Build must_not array for exclusions
+  local must_not_clause=""
+  if [ -n "$exclude_extensions" ]; then
+    local ext_array=""
+    IFS=',' read -ra EXTS <<< "$exclude_extensions"
+    for ext in "${EXTS[@]}"; do
+      ext=$(echo "$ext" | xargs) # trim whitespace
+      if [ -n "$ext_array" ]; then
+        ext_array="${ext_array},\"$ext\""
+      else
+        ext_array="\"$ext\""
+      fi
+    done
+    must_not_clause="\"must_not\":[{\"terms\":{\"extension\":[$ext_array]}}]"
+  fi
+  
+  # Build must clause for inclusions
+  if [ -n "$include_extensions" ]; then
+    local inc_ext_array=""
+    IFS=',' read -ra INCS <<< "$include_extensions"
+    for ext in "${INCS[@]}"; do
+      ext=$(echo "$ext" | xargs) # trim whitespace
+      if [ -n "$inc_ext_array" ]; then
+        inc_ext_array="${inc_ext_array},\"$ext\""
+      else
+        inc_ext_array="\"$ext\""
+      fi
+    done
+    if [ -n "$must_not_clause" ]; then
+      must_not_clause="${must_not_clause},{\"terms\":{\"extension\":[$inc_ext_array]}}"
     else
-        echo "\"bool\":{}"
+      # If we want to include specific extensions, we need to add them to must
+      must_clause="${must_clause%,},{\"terms\":{\"extension\":[$inc_ext_array]}},"
     fi
+  fi
+  
+  # Combine clauses
+  local bool_query="\"bool\":{"
+  [ -n "$must_clause" ] && bool_query="${bool_query}${must_clause}"
+  [ -n "$should_clause" ] && bool_query="${bool_query}${should_clause}"
+  [ -n "$must_not_clause" ] && bool_query="${bool_query}${must_not_clause}"
+  bool_query="${bool_query%,}}"
+  
+  echo "$bool_query"
 }
 
 make_request() {
@@ -306,6 +274,7 @@ format_search_results() {
     counter=$((counter + 1))
   done
   
+  # Show pagination info
   local from_offset="$argc_from"
   local size_limit="$argc_size"
   local current_page=$(((from_offset / size_limit) + 1))
@@ -320,6 +289,7 @@ format_search_results() {
   fi
 }
 
+# Main command processing
 if [ -z "$argc_command" ]; then
   show_help
   exit 0
@@ -327,6 +297,7 @@ fi
 
 case "$argc_command" in
 search)
+  # Determine search strategy
   url_query=""
   filename_query=""
   
@@ -342,13 +313,16 @@ search)
     filename_query="$argc_query"
   fi
   
+  # Build query
   bool_query=$(build_query "$url_query" "$filename_query" "$argc_exclude_ext" "$argc_extension")
   
+  # Build highlight section
   highlight_section=""
   if [ "$argc_highlight" = 1 ]; then
     highlight_section='"highlight":{"fields":{"url":{},"filename":{}}},'
   fi
   
+  # Build final query JSON
   query_json="{\"size\":$argc_size,\"from\":$argc_from,${highlight_section}\"query\":{$bool_query}}"
   
   if [ "$argc_verbose" = 1 ] && [ "$argc_json" != 1 ]; then

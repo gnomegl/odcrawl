@@ -405,6 +405,19 @@ get_domain() {
   echo "$url" | sed -E 's|^https?://([^/]+).*|\1|'
 }
 
+# URL encode a string for HTTP requests
+# Only encode spaces and special characters that break URLs, not the basic structure
+url_encode() {
+  local string="$1"
+  # Use jq to encode only specific characters, preserving URL structure
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$string" | jq -sRr @uri | sed 's/%3A/:/g; s/%2F/\//g'
+  else
+    # Fallback to basic space encoding if jq is not available
+    printf '%s' "$string" | sed 's/ /%20/g'
+  fi
+}
+
 clean_html_tags() {
   echo "$1" | sed 's/<[^>]*>//g'
 }
@@ -414,6 +427,11 @@ build_query() {
   local filename_query="$2"
   local exclude_extensions="$3"
   local include_extensions="$4"
+  
+  # URL encode spaces in url_query
+  if [ -n "$url_query" ]; then
+    url_query=$(url_encode "$url_query")
+  fi
   
   # Build must array
   local must_clause=""
@@ -587,7 +605,7 @@ format_search_results() {
       fi
     fi
     
-    printf "     ${cyan}Link:${reset} ${blue}%s${reset}\n" "$url"
+    printf "     ${cyan}Link:${reset} ${blue}%s${reset}\n" "$(url_encode "$url")"
     printf "     ${cyan}Domain:${reset} ${blue}%s${reset}\n" "$domain"
     printf "     ${cyan}Extension:${reset} ${yellow}%s${reset}\n" "$extension"
     printf "     ${cyan}Score:${reset} ${magenta}%.2f${reset}\n" "$score"
